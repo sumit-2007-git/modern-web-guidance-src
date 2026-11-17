@@ -280,13 +280,16 @@ describe('modern-web CLI', () => {
     }
   });
 
-  it('passes -y to npx when uninstalling skills', () => {
+  it('passes -y to npx and sets npm_config_force=true when uninstalling skills without pnpm/yarn/bun user agent', () => {
     const tempBinDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mwg-npx-test-'));
     const logFile = path.join(tempBinDir, 'npx-args.json');
-    const npxShim = path.join(tempBinDir, 'npx');
+    const isWin = process.platform === 'win32';
+    const npxShim = path.join(tempBinDir, isWin ? 'npx.cmd' : 'npx');
     fs.writeFileSync(
       npxShim,
-      `#!/bin/sh\nnode -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)))' "${logFile}" "$@"\n`,
+      isWin
+        ? `@echo off\r\nnode -e "require('node:fs').writeFileSync(process.argv[1], JSON.stringify({ args: process.argv.slice(2), force: process.env.npm_config_force }))" "${logFile}" %*\r\n`
+        : `#!/bin/sh\nnode -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify({ args: process.argv.slice(2), force: process.env.npm_config_force }))' "${logFile}" "$@"\n`,
       { mode: 0o755 }
     );
 
@@ -295,7 +298,9 @@ describe('modern-web CLI', () => {
         encoding: 'utf8',
         env: {
           ...process.env,
-          PATH: `${tempBinDir}:${process.env.PATH}`,
+          PATH: `${tempBinDir}${path.delimiter}${process.env.PATH}`,
+          npm_config_user_agent: undefined,
+          npm_config_force: undefined,
           NO_COLOR: '1',
           DISABLE_TELEMETRY: '1',
         },
@@ -303,8 +308,43 @@ describe('modern-web CLI', () => {
 
       assert.strictEqual(result.status, 0);
       assert.ok(fs.existsSync(logFile), 'Dummy npx should have recorded arguments');
+      const recorded = JSON.parse(fs.readFileSync(logFile, 'utf8'));
+      assert.deepStrictEqual(recorded.args.slice(0, 3), ['-y', 'skills', 'remove']);
+      assert.strictEqual(recorded.force, 'true');
+    } finally {
+      fs.rmSync(tempBinDir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses pnpm dlx when updating skills under pnpm user agent', () => {
+    const tempBinDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mwg-pnpm-test-'));
+    const logFile = path.join(tempBinDir, 'pnpm-args.json');
+    const isWin = process.platform === 'win32';
+    const pnpmShim = path.join(tempBinDir, isWin ? 'pnpm.cmd' : 'pnpm');
+    fs.writeFileSync(
+      pnpmShim,
+      isWin
+        ? `@echo off\r\nnode -e "require('node:fs').writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)))" "${logFile}" %*\r\n`
+        : `#!/bin/sh\nnode -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify(process.argv.slice(2)))' "${logFile}" "$@"\n`,
+      { mode: 0o755 }
+    );
+
+    try {
+      const result = spawnSync('node', [scriptPath, 'update'], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${tempBinDir}${path.delimiter}${process.env.PATH}`,
+          npm_config_user_agent: 'pnpm/11.25.0 npm/? node/v24.21.0 linux x64',
+          NO_COLOR: '1',
+          DISABLE_TELEMETRY: '1',
+        },
+      });
+
+      assert.strictEqual(result.status, 0);
+      assert.ok(fs.existsSync(logFile), 'Dummy pnpm should have recorded arguments');
       const args = JSON.parse(fs.readFileSync(logFile, 'utf8'));
-      assert.deepStrictEqual(args.slice(0, 3), ['-y', 'skills', 'remove']);
+      assert.deepStrictEqual(args.slice(0, 3), ['dlx', 'skills', 'update']);
     } finally {
       fs.rmSync(tempBinDir, { recursive: true, force: true });
     }

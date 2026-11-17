@@ -19,6 +19,7 @@ import { getVersion } from "./version.ts";
 import { getSkillUpdateLevel, isFrozenClaudeMarketplaceVersion } from "./skill-version.ts";
 import { USE_CASES } from "../rag/guides.ts";
 import { determineAgent, KNOWN_AGENTS } from "./telemetry/detect-agent.ts";
+import { resolveSkillsRunner } from "./skills-runner.ts";
 
 declare const __MWG_DIST_TAG__: string | undefined;
 
@@ -242,17 +243,20 @@ async function main() {
     const repoSource = distTag === "next"
       ? "https://github.com/GoogleChrome/modern-web-guidance/tree/next"
       : "GoogleChrome/modern-web-guidance";
-    const installArgs = `-y skills add ${repoSource} ${values.choose ? "" : "--skill modern-web-guidance"}`
-      .split(" ")
-      .filter(Boolean)
-      .concat(extraArgs);
+    const skillsArgs = [
+      "add",
+      repoSource,
+      ...(values.choose ? [] : ["--skill", "modern-web-guidance"]),
+      ...extraArgs,
+    ];
 
     const detectedAgent = determineAgent().agent?.name;
-    const env = detectedAgent ? { ...process.env, AI_AGENT: detectedAgent } : process.env;
-    const result = spawnSync("npx", installArgs, {
+    const baseEnv = detectedAgent ? { ...process.env, AI_AGENT: detectedAgent } : process.env;
+    const runner = resolveSkillsRunner(skillsArgs, baseEnv);
+    const result = spawnSync(runner.command, [...runner.args], {
       stdio: "inherit",
       shell: process.platform === "win32",
-      env,
+      env: runner.env,
     });
 
     const success = !result.error && result.status === 0;
@@ -267,9 +271,11 @@ async function main() {
   } else if (command === "update") {
     const startTime = Date.now();
     const skills = getOurCLIAdjacentSkillIDs();
-    const result = spawnSync("npx", ["-y", "skills", "update", ...skills], {
+    const runner = resolveSkillsRunner(["update", ...skills]);
+    const result = spawnSync(runner.command, [...runner.args], {
       stdio: "inherit",
       shell: process.platform === "win32",
+      env: runner.env,
     });
     const success = !result.error && result.status === 0;
     await getLogger().logToolCommand(Date.now() - startTime, success, CommandType.UPDATE);
@@ -296,9 +302,11 @@ async function main() {
   } else if (command === "uninstall") {
     const startTime = Date.now();
     const skills = getOurCLIAdjacentSkillIDs();
-    const result = spawnSync("npx", ["-y", "skills", "remove", ...skills], {
+    const runner = resolveSkillsRunner(["remove", ...skills]);
+    const result = spawnSync(runner.command, [...runner.args], {
       stdio: "inherit",
       shell: process.platform === "win32",
+      env: runner.env,
     });
     const success = !result.error && result.status === 0;
     await getLogger().logToolCommand(Date.now() - startTime, success, CommandType.UNINSTALL);
