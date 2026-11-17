@@ -423,4 +423,82 @@ void test('js/copying-array-methods matcher', async (t) => {
       [2],
     );
   });
+
+  await t.test('exempts String(), string-returning methods, DOM text/value properties, and local generators', () => {
+    const exemptCode = `
+      function* range(n) {
+        for (let i = 0; i < n; i++) yield i;
+      }
+      const genExpr = function* (n) {
+        yield n;
+      };
+      class Counter {
+        *items() {
+          yield 1;
+        }
+        static *staticItems() {
+          yield 2;
+        }
+        run() {
+          return [
+            [...this.items()].reverse(),
+            [...Counter.staticItems()].sort(),
+          ];
+        }
+      }
+      export const reverseDigits = (n) => [...String(n)].reverse().join('');
+      export const reverseGlobalString = (n) => [...globalThis.String(n)].reverse().join('');
+      export const reverseFromChar = (c) => [...String.fromCharCode(c)].reverse();
+      export const reverseNum = (n) => [...n.toString()].reverse().join('');
+      export const reverseFixed = (n) => [...n.toFixed(2)].reverse();
+      export const reverseJoined = (arr) => [...arr.join(',')].reverse();
+      export const reverseText = (el) => [...el.textContent].reverse().join('');
+      export const reverseInnerText = (el) => [...el.innerText].reverse();
+      export const reverseInput = (input, e) => [
+        [...input.value].reverse(),
+        [...e.target.value].reverse(),
+        [...document.querySelector('input').value].reverse(),
+      ];
+      export const countdown = () => {
+        const seq = range(5);
+        return [
+          [...range(5)].reverse(),
+          [...genExpr(3)].sort(),
+          [...seq].reverse(),
+        ];
+      };
+    `;
+    assert.equal(matchJsRule(copyingArrayMethodsMatcher, 'strings-and-generators.js', exemptCode).length, 0);
+
+    const typedDomValue = `
+      function fromTypedDom(field: HTMLInputElement, holder: { value: string }) {
+        return [
+          [...field.value].reverse(),
+          [...holder.value].sort(),
+        ];
+      }
+    `;
+    assert.equal(matchJsRule(copyingArrayMethodsMatcher, 'typed-dom-value.ts', typedDomValue).length, 0);
+
+    const stillFlagged = `
+      function keepArrayFindings(
+        arr: number[],
+        itemsRef: { value: number[] },
+        items,
+      ) {
+        const joined = arr.join(',');
+        const str = arr.toString();
+        const a = [...arr].sort();
+        const b = [...itemsRef.value].sort();
+        const c = [...items.value].reverse();
+        const String = (x: number) => [x, x + 1];
+        const d = [...String(1)].reverse();
+        return [joined, str, a, b, c, d];
+      }
+    `;
+    assert.deepEqual(
+      matchJsRule(copyingArrayMethodsMatcher, 'keep-arrays.ts', stillFlagged).map((m) => m.line),
+      [9, 10, 11, 13],
+    );
+  });
 });

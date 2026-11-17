@@ -25,22 +25,54 @@ const MODERN_METHODS = ['toSorted', 'toReversed', 'findLast', 'findLastIndex'];
 const NON_ARRAY_TYPE = new RegExp(
   '^(?:(?:Readonly)?(?:Set|Map|NodeList(?:Of)?|HTMLCollection(?:Of)?|DOMTokenList|' +
     'NamedNodeMap|FileList|HTMLOptionsCollection|(?:Async)?Iterable(?:Iterator)?|Generator|RegExpExecArray|' +
-    'IArguments)(?:<.*>)?|string)$',
+    'IArguments)(?:<.*>)?|string|String)$',
   's',
 );
 const ELEMENT_DOM_PROPERTY = new RegExp(
   '^(?:child(?:ren|Nodes)|classList|attributes|files|tBodies|rows|cells|options|' +
-    'styleSheets|selectedOptions)$',
+    'styleSheets|selectedOptions|textContent|innerText|innerHTML|outerHTML)$',
 );
 const DOCUMENT_COLLECTION_PROPERTY = new RegExp(
   '^(?:scripts|forms|images|links|embeds|applets|anchors)$',
 );
 const DOCUMENT_RECEIVER_RE = /(?:^|D)ocument$|^doc$/;
+const DOM_VALUE_RECEIVER_RE =
+  /^(?:el|elem|element|node|input|textarea|select|option|field|control|attr|target|currentTarget)$|(?:Input|Textarea|TextArea|Select|Option|Element|El|Field|Control|Target)$/;
+const DOM_VALUE_TYPE_RE =
+  /^(?:HTML(?:Input|TextArea|Select|Option|Button|Output|Data|Meter|Progress)Element|Attr|RadioNodeList)$/;
+const DOM_VALUE_FACTORY_METHOD_RE = /^(?:querySelector|getElementById|closest)$/;
 const DOM_OR_STRING_METHOD = new RegExp(
   '^(?:querySelectorAll|getElementsBy(?:TagName(?:NS)?|ClassName|Name)|match(?:All)?|search|' +
     '(?:starts|ends)With|replace(?:All)?|trim(?:Start|End)?|to(?:Lower|Upper)Case|substr(?:ing)?|' +
     'char(?:Code|CodePoint)?At|pad(?:Start|End)|repeat)$',
 );
+const STRING_RETURNING_METHOD = /^(?:to(?:Locale)?String|toFixed|toExponential|toPrecision|join)$/;
+const STRING_STATIC_METHOD = /^(?:fromCharCode|fromCodePoint|raw)$/;
+
+function isDomValueReceiver(expr: Node): boolean {
+  const unwrapped = unwrapExpression(expr);
+  if (Node.isIdentifier(unwrapped)) {
+    return DOM_VALUE_RECEIVER_RE.test(unwrapped.getText());
+  }
+  if (Node.isPropertyAccessExpression(unwrapped)) {
+    return DOM_VALUE_RECEIVER_RE.test(unwrapped.getName());
+  }
+  const method = unwrapStrictMethod(unwrapped);
+  if (method && DOM_VALUE_FACTORY_METHOD_RE.test(method.methodName)) {
+    return true;
+  }
+  return false;
+}
+
+function isGeneratorCallable(node: Node | undefined): boolean {
+  if (!node) return false;
+  return (
+    (Node.isFunctionDeclaration(node) ||
+      Node.isFunctionExpression(node) ||
+      Node.isMethodDeclaration(node)) &&
+    node.isGenerator()
+  );
+}
 
 function isDocumentReceiver(expr: Node): boolean {
   const unwrapped = unwrapExpression(expr);
@@ -146,20 +178,21 @@ function classifyCallReturnType(call: CallExpression, method: UnwrappedMethodCal
         (ancestor) => Node.isClassDeclaration(ancestor) || Node.isClassExpression(ancestor),
       );
       if (cls) {
-        const retText = cls.getMethod(method.methodName)?.getReturnTypeNode()?.getText();
+        const clsMethod = cls.getMethod(method.methodName);
+        if (isGeneratorCallable(clsMethod)) return 'non-array';
+        const retText = clsMethod?.getReturnTypeNode()?.getText();
         if (retText) return classifyTypeText(retText, sourceFile);
         const propInit = cls.getProperty(method.methodName)?.getInitializer();
         const unwrappedInit = propInit ? unwrapExpression(propInit) : undefined;
+        if (isGeneratorCallable(unwrappedInit)) return 'non-array';
         if (unwrappedInit && isCallableNode(unwrappedInit)) {
           return classifyTypeText(unwrappedInit.getReturnTypeNode()?.getText(), sourceFile);
         }
       }
     } else if (Node.isIdentifier(receiver)) {
-      const retText = sourceFile
-        .getClass(receiver.getText())
-        ?.getStaticMethod(method.methodName)
-        ?.getReturnTypeNode()
-        ?.getText();
+      const staticMethod = sourceFile.getClass(receiver.getText())?.getStaticMethod(method.methodName);
+      if (isGeneratorCallable(staticMethod)) return 'non-array';
+      const retText = staticMethod?.getReturnTypeNode()?.getText();
       if (retText) return classifyTypeText(retText, sourceFile);
     }
     return 'array';
@@ -168,6 +201,7 @@ function classifyCallReturnType(call: CallExpression, method: UnwrappedMethodCal
   const callee = unwrapExpression(call.getExpression());
   if (Node.isIdentifier(callee)) {
     const resolved = resolveCallableNode(callee, 2);
+    if (isGeneratorCallable(resolved)) return 'non-array';
     if (isCallableNode(resolved)) {
       return classifyTypeText(resolved.getReturnTypeNode()?.getText(), resolved.getSourceFile());
     }
@@ -247,14 +281,15 @@ function findExplicitTypeNode(node: Node): TypeNode | undefined {
   });
 }
 
-function resolveDocumentCollectionKindFromTypeNode(
+function resolveMemberKindFromTypeNode(
   typeNode: TypeNode,
   memberName: string,
+  domReceiverTypeRe: RegExp,
   seenAliases?: Set<string>,
 ): ReceiverKind | 'unknown-type' {
   const sourceFile = typeNode.getSourceFile();
   if (Node.isParenthesizedTypeNode(typeNode)) {
-    return resolveDocumentCollectionKindFromTypeNode(typeNode.getTypeNode(), memberName, seenAliases);
+    return resolveMemberKindFromTypeNode(typeNode.getTypeNode(), memberName, domReceiverTypeRe, seenAliases);
   }
   if (Node.isUnionTypeNode(typeNode)) {
     const armKinds = typeNode
@@ -263,7 +298,7 @@ function resolveDocumentCollectionKindFromTypeNode(
         const text = arm.getText().trim();
         return text !== 'null' && text !== 'undefined';
       })
-      .map((arm) => resolveDocumentCollectionKindFromTypeNode(arm, memberName, seenAliases));
+      .map((arm) => resolveMemberKindFromTypeNode(arm, memberName, domReceiverTypeRe, seenAliases));
     if (armKinds.includes('non-array')) return 'non-array';
     if (armKinds.some((k) => k === 'unknown-type')) return 'unknown-type';
     return armKinds.includes('typed-array') ? 'typed-array' : 'array';
@@ -274,7 +309,7 @@ function resolveDocumentCollectionKindFromTypeNode(
   }
   if (Node.isTypeReference(typeNode)) {
     const name = typeNode.getTypeName().getText();
-    if (DOM_DOCUMENT_TYPE_RE.test(name)) return 'non-array';
+    if (domReceiverTypeRe.test(name)) return 'non-array';
     const ifaceMember = sourceFile.getInterface(name)?.getProperty(memberName)?.getTypeNode();
     if (ifaceMember) return classifyTypeText(ifaceMember.getText(), sourceFile);
     const clsMember = sourceFile.getClass(name)?.getProperty(memberName)?.getTypeNode();
@@ -283,7 +318,7 @@ function resolveDocumentCollectionKindFromTypeNode(
     if (aliasTypeNode) {
       const nextSeen = new Set(seenAliases);
       nextSeen.add(name);
-      return resolveDocumentCollectionKindFromTypeNode(aliasTypeNode, memberName, nextSeen);
+      return resolveMemberKindFromTypeNode(aliasTypeNode, memberName, domReceiverTypeRe, nextSeen);
     }
     return 'array';
   }
@@ -311,10 +346,18 @@ function classifyReceiverNode(node: Node | undefined, depth = 0): ReceiverKind {
     if (DOCUMENT_COLLECTION_PROPERTY.test(propName)) {
       const receiverTypeNode = findExplicitTypeNode(unwrapped.getExpression());
       if (receiverTypeNode) {
-        const resolved = resolveDocumentCollectionKindFromTypeNode(receiverTypeNode, propName);
+        const resolved = resolveMemberKindFromTypeNode(receiverTypeNode, propName, DOM_DOCUMENT_TYPE_RE);
         if (resolved !== 'unknown-type') return resolved;
       }
       if (isDocumentReceiver(unwrapped.getExpression())) return 'non-array';
+    }
+    if (propName === 'value') {
+      const receiverTypeNode = findExplicitTypeNode(unwrapped.getExpression());
+      if (receiverTypeNode) {
+        const resolved = resolveMemberKindFromTypeNode(receiverTypeNode, propName, DOM_VALUE_TYPE_RE);
+        if (resolved !== 'unknown-type') return resolved;
+      }
+      if (isDomValueReceiver(unwrapped.getExpression())) return 'non-array';
     }
   }
 
@@ -340,9 +383,19 @@ function classifyReceiverNode(node: Node | undefined, depth = 0): ReceiverKind {
     return leftKind !== 'array' ? leftKind : classifyReceiverNode(unwrapped.getRight(), depth + 1);
   }
 
+  if (Node.isCallExpression(unwrapped) && isGlobalReference(unwrapped.getExpression(), 'String')) {
+    return 'non-array';
+  }
+
   const method = unwrapStrictMethod(unwrapped);
   if (method) {
-    if (DOM_OR_STRING_METHOD.test(method.methodName)) return 'non-array';
+    if (
+      DOM_OR_STRING_METHOD.test(method.methodName) ||
+      STRING_RETURNING_METHOD.test(method.methodName) ||
+      (isGlobalReference(method.receiver, 'String') && STRING_STATIC_METHOD.test(method.methodName))
+    ) {
+      return 'non-array';
+    }
     if (method.methodName === 'keys' || method.methodName === 'values' || method.methodName === 'entries') {
       return isGlobalReference(method.receiver, 'Object') ? 'array' : 'non-array';
     }
